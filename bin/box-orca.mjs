@@ -26,6 +26,11 @@ const BIN_PATH = path.join(HOME_DIR, "bin", "box-orca");
 const DEFAULT_BASE_URL = "https://us-east-1.box.upstash.com";
 const PROJECT_ROOT = "/workspace/home/repo";
 const BUNDLE_PATH = "/workspace/home/.box-orca/repo.bundle";
+// Run in a box restored from a snapshot, before Orca connects.
+const SNAPSHOT_RESET = [
+  `rm -rf "$HOME/.orca" ${PROJECT_ROOT}`,
+  `find "$HOME/.orca-remote" -maxdepth 2 \\( -name '.orcad-pid' -o -name '.orcad-pid-machine' -o -name '.orcad-readiness' -o -name '.orcad-startup-qualified' -o -name 'orcad.log' \\) -delete 2>/dev/null || true`,
+];
 // Host key of the Upstash Box SSH gateway (us-east-1). Pinned so setup never trusts a key
 // fetched over the network.
 const GATEWAY_HOST_KEY =
@@ -37,6 +42,17 @@ console.log = (...a) => console.error(...a);
 const log = (...a) => console.error("[box-orca]", ...a);
 
 class UserError extends Error {}
+
+// One line per lifecycle call in ~/.upstash/box-orca/lifecycle.log, for debugging what Orca ran.
+// Never logs secrets: box ids, timings, and the shape of Orca's payload only.
+const LIFECYCLE = new Set(["create", "suspend", "resume", "destroy"]);
+function trace(fields) {
+  try {
+    fs.mkdirSync(HOME_DIR, { recursive: true, mode: 0o700 });
+    const line = JSON.stringify({ t: new Date().toISOString(), cmd: process.argv[2], pid: process.pid, ...fields });
+    fs.appendFileSync(path.join(HOME_DIR, "lifecycle.log"), line + "\n", { mode: 0o600 });
+  } catch {}
+}
 
 function sh(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, { encoding: "utf8", ...opts });
@@ -199,6 +215,27 @@ async function cmdSetup(flags) {
 
 // ---------- create ----------
 
+// Best effort: the newest remote runtime Orca has cached on this Mac, named like the folder Orca
+// installs on the box (orcad-<version>). Returns undefined where it cannot tell.
+function currentOrcaRuntime() {
+  const base = path.join(os.homedir(), "Library", "Application Support", "Orca", "orcad-artifacts");
+  try {
+    const versions = fs
+      .readdirSync(base, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && d.name !== "node")
+      .flatMap((d) =>
+        fs.readdirSync(path.join(base, d.name)).map((v) => ({
+          v,
+          mtime: fs.statSync(path.join(base, d.name, v)).mtimeMs,
+        })),
+      )
+      .sort((a, b) => b.mtime - a.mtime);
+    return versions.length ? `orcad-${versions[0].v}` : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function prepareBundle(head) {
   const ref = `refs/box-orca/tmp-${process.pid}-${Date.now()}`;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "box-orca-"));
@@ -263,6 +300,13 @@ async function cmdCreate() {
   const boxOpts = { apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, name, labels: ["orca"], size: cfg.size };
   if (!cfg.snapshotId) boxOpts.runtime = "node";
 
+  if (cfg.snapshotId && cfg.snapshotRuntime) {
+    const current = currentOrcaRuntime();
+    if (current && current !== cfg.snapshotRuntime) {
+      log(`Your snapshot has Orca runtime ${cfg.snapshotRuntime}, but this Orca uses ${current}. ` +
+        "This workspace will reinstall it on first connect. Afterwards run `box-orca snapshot` to refresh.");
+    }
+  }
   log(cfg.snapshotId ? `Creating box from snapshot ${cfg.snapshotId}…` : "Creating box…");
   const box = cfg.snapshotId ? await Box.fromSnapshot(cfg.snapshotId, boxOpts) : await Box.create(boxOpts);
   log(`Box ${box.id} is up`);
@@ -293,6 +337,9 @@ async function cmdCreate() {
 
     const script = [
       "set -e",
+      // From a snapshot: give this workspace its own Orca identity and a fresh checkout, but keep the
+      // installed Orca runtime (~/.orca-remote) and agent logins. Never reuse ~/.orca across boxes.
+      ...(cfg.snapshotId ? SNAPSHOT_RESET : []),
       // A bundle clone copies only branches and tags, so fetch the temporary ref explicitly.
       `git init --quiet ${q(PROJECT_ROOT)}`,
       `cd ${q(PROJECT_ROOT)}`,
@@ -315,23 +362,7 @@ async function cmdCreate() {
     log("Waiting for SSH…");
     await waitForSSH(cfg, box.id);
 
-    writeResult({
-      schemaVersion: 2,
-      checkoutMode: "provisioned-root",
-      connection: {
-        type: "ssh",
-        projectRoot: PROJECT_ROOT,
-        target: {
-          label: `Upstash Box ${box.id}`,
-          host: sshHost(cfg),
-          port: 22,
-          username: box.id,
-          identityFile: KEY_PATH,
-          identitiesOnly: true,
-        },
-      },
-      userData: { provider: "upstash-box", resourceId: box.id },
-    });
+    writeResult(recipeResult(cfg, box.id));
   } catch (e) {
     await cleanup(e.message);
     throw e;
@@ -344,17 +375,90 @@ async function cmdCreate() {
 
 // ---------- destroy ----------
 
-async function cmdDestroy() {
-  const cfg = readConfig();
+// The SSH connection Orca dials. create and resume both print it.
+function recipeResult(cfg, boxId) {
+  return {
+    schemaVersion: 2,
+    checkoutMode: "provisioned-root",
+    connection: {
+      type: "ssh",
+      projectRoot: PROJECT_ROOT,
+      target: {
+        label: `Upstash Box ${boxId}`,
+        host: sshHost(cfg),
+        port: 22,
+        username: boxId,
+        identityFile: KEY_PATH,
+        identitiesOnly: true,
+      },
+    },
+    userData: { provider: "upstash-box", resourceId: boxId },
+  };
+}
+
+// suspend, resume and destroy get Orca's lifecycle payload on stdin.
+async function payloadBoxId() {
   const chunks = [];
   if (!process.stdin.isTTY) for await (const c of process.stdin) chunks.push(c);
   const raw = Buffer.concat(chunks).toString("utf8").trim();
   let id = process.env.REMOTE_WORKSPACE_ID;
+  let payload;
   if (raw) {
-    const payload = JSON.parse(raw);
+    payload = JSON.parse(raw);
     id = payload?.recipeResult?.userData?.resourceId ?? id;
   }
+  // Record the payload's shape (keys only, no values) to debug Orca contract changes.
+  const shape = (v, d = 0) =>
+    v && typeof v === "object" && d < 3
+      ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, shape(x, d + 1)]))
+      : typeof v;
+  trace({ payload: payload ? shape(payload) : raw ? "unparsed" : "empty", resourceId: id ?? null });
   if (!id) throw new UserError("No resourceId in the lifecycle payload.");
+  return id;
+}
+
+const boxStatus = async (box) => (await box.getStatus()).status;
+
+// ---------- suspend / resume ----------
+// Not declared in vm-recipe.json yet. After a suspend, Orca keeps reconnecting to the workspace,
+// and the Box SSH gateway wakes a paused box on any new SSH login, so the box is running again
+// within about 30 seconds. Declare these once Orca stops reconnecting to suspended workspaces, or
+// Box can turn off wake-on-SSH for a box.
+// Pausing stops the box's processes but keeps its files. On reconnect Orca restarts its daemon and
+// resumes the agent conversation from its saved history; a command running at pause time is lost.
+
+async function cmdSuspend() {
+  const cfg = readConfig();
+  const id = await payloadBoxId();
+  const box = await Box.get(id, { apiKey: cfg.apiKey, baseUrl: cfg.baseUrl });
+  if ((await boxStatus(box)) === "paused") {
+    log(`Box ${id} is already paused`);
+    return;
+  }
+  await box.pause();
+  log(`Paused box ${id}`);
+}
+
+async function cmdResume() {
+  const cfg = readConfig();
+  const id = await payloadBoxId();
+  const box = await Box.get(id, { apiKey: cfg.apiKey, baseUrl: cfg.baseUrl });
+  const status = await boxStatus(box);
+  if (status === "paused") {
+    log(`Resuming box ${id}…`);
+    await box.resume();
+  } else {
+    log(`Box ${id} is ${status}`);
+  }
+  await waitForSSH(cfg, id);
+  writeResult(recipeResult(cfg, id));
+}
+
+// ---------- destroy ----------
+
+async function cmdDestroy() {
+  const cfg = readConfig();
+  const id = await payloadBoxId();
 
   // destroy must be safe to repeat: a box that is already gone counts as success.
   const gone = (e) => e?.statusCode === 404 || /not found|been deleted|already deleted/i.test(e?.message ?? "");
@@ -365,6 +469,65 @@ async function cmdDestroy() {
   } catch (e) {
     if (!gone(e)) throw e;
     log(`Box ${id} is already gone`);
+  }
+}
+
+// ---------- snapshot ----------
+// Snapshot a workspace box Orca has already set up, so later workspaces skip the runtime install.
+// `create` removes the snapshot's Orca identity and checkout from every box restored from it.
+
+async function cmdSnapshot(flags) {
+  const cfg = readConfig();
+  let boxId = typeof flags.box === "string" ? flags.box : undefined;
+  if (!boxId) {
+    const boxes = await Box.list({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, label: "orca" });
+    const live = boxes.filter((b) => b.status !== "deleted");
+    if (live.length !== 1) {
+      throw new UserError(
+        live.length
+          ? `Found ${live.length} Orca boxes (${live.map((b) => b.id).join(", ")}); pick one with --box <id>.`
+          : "No Orca workspace box found. Create one workspace in Orca on Upstash Box first, then run this.",
+      );
+    }
+    boxId = live[0].id;
+  }
+  const box = await Box.get(boxId, { apiKey: cfg.apiKey, baseUrl: cfg.baseUrl });
+  const check = await box.exec.command(
+    `bash -c ${q('ls -d "$HOME"/.orca-remote/orcad-*/.install-complete 2>/dev/null | head -1 | xargs -r dirname | xargs -r basename')}`,
+  );
+  const runtime = String(check.result ?? check.stdout ?? "").trim();
+  if (!runtime) {
+    throw new UserError(`Orca's runtime is not installed on ${boxId} yet. Wait until the workspace has connected, then retry.`);
+  }
+  const logins = await box.exec.command(
+    `bash -c ${q(
+      '[ -s "$HOME/.claude/.credentials.json" ] && echo claude; ' +
+        '[ -s "$HOME/.codex/auth.json" ] && echo codex; ' +
+        'gh auth status >/dev/null 2>&1 && echo gh; true',
+    )}`,
+  );
+  const found = String(logins.result ?? logins.stdout ?? "").trim().split("\n").filter(Boolean);
+  const loggedIn = found.filter((n) => n !== "gh");
+  const ghLoggedIn = found.includes("gh");
+
+  log(`Snapshotting ${boxId} (Orca runtime ${runtime})…`);
+  const snap = await box.snapshot({ name: `box-orca-${runtime}`.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 60) });
+  const previous = cfg.snapshotId;
+  writeConfig({ ...cfg, snapshotId: snap.id, snapshotRuntime: runtime });
+  log(`Saved snapshot ${snap.id}. New workspaces start from it.`);
+  log(loggedIn.length ? `Agent logins included: ${loggedIn.join(", ")}` :
+    "No agent logins found in the box; agents will ask you to log in in each workspace.");
+  if (!ghLoggedIn) {
+    log("No GitHub login in the box. To push from workspaces, connect GitHub in the Upstash Console " +
+      "(Box > Settings), or run `gh auth login` and `gh auth setup-git` in the box and snapshot again.");
+  }
+  if (previous && previous !== snap.id) {
+    try {
+      await box.deleteSnapshot(previous);
+      log(`Deleted the previous snapshot ${previous}`);
+    } catch (e) {
+      log(`Could not delete the previous snapshot ${previous}: ${e.message}`);
+    }
   }
 }
 
@@ -399,16 +562,31 @@ async function cmdDoctor() {
 // ---------- main ----------
 
 const [cmd, ...rest] = process.argv.slice(2);
-const commands = { setup: cmdSetup, create: cmdCreate, destroy: cmdDestroy, doctor: cmdDoctor };
+const commands = {
+  setup: cmdSetup,
+  create: cmdCreate,
+  suspend: cmdSuspend,
+  resume: cmdResume,
+  destroy: cmdDestroy,
+  snapshot: cmdSnapshot,
+  doctor: cmdDoctor,
+};
 if (cmd === "--version" || cmd === "version") {
   console.error(VERSION);
 } else if (!commands[cmd]) {
-  console.error(`box-orca ${VERSION}\nUsage: box-orca <setup|create|destroy|doctor>`);
+  console.error(`box-orca ${VERSION}\nUsage: box-orca <setup|create|suspend|resume|destroy|snapshot|doctor>`);
   process.exitCode = 2;
 } else {
-  commands[cmd](parseFlags(rest)).catch((e) => {
-    const userFacing = e instanceof UserError || e?.name === "BoxError";
-    log(userFacing ? e.message : e.stack || e.message);
-    process.exit(1);
-  });
+  const started = Date.now();
+  if (LIFECYCLE.has(cmd)) {
+    trace({ start: true, vmMode: process.env.ORCA_VM_MODE ?? null, instance: process.env.ORCA_VM_INSTANCE_ID ?? null });
+  }
+  commands[cmd](parseFlags(rest))
+    .then(() => LIFECYCLE.has(cmd) && trace({ ok: true, ms: Date.now() - started }))
+    .catch((e) => {
+      const userFacing = e instanceof UserError || e?.name === "BoxError";
+      log(userFacing ? e.message : e.stack || e.message);
+      if (LIFECYCLE.has(cmd)) trace({ ok: false, ms: Date.now() - started, error: e.message });
+      process.exit(1);
+    });
 }
