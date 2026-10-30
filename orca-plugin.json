@@ -4,14 +4,28 @@
   "id": "upstash-box",
   "publisher": "upstash",
   "name": "Upstash Box",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Experimental. Run each Orca workspace in its own Upstash Box, reached over SSH.",
   "license": "MIT",
   "homepage": "https://upstash.com/docs/box",
   "repository": "https://github.com/upstash/box-orca-plugin",
-  "author": { "name": "Upstash", "url": "https://upstash.com" },
-  "engines": { "orca": ">=1.4.245" },
+  "author": {
+    "name": "Upstash",
+    "url": "https://upstash.com"
+  },
+  "icon": "assets/icon.png",
+  "cover": {
+    "path": "assets/cover.png",
+    "alt": "Upstash logo with the text Box for Orca: every workspace in its own Upstash Box"
+  },
+  "engines": {
+    "orca": ">=1.4.245"
+  },
   "contributes": {
-    "vmRecipes": [{ "path": "vm-recipe.json" }]
+    "vmRecipes": [
+      {
+        "path": "vm-recipe.json"
+      }
+    ]
   }
 }

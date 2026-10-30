@@ -17,7 +17,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Box } from "@upstash/box";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 const HOME_DIR = path.join(os.homedir(), ".upstash", "box-orca");
 const CONFIG_PATH = path.join(HOME_DIR, "config.json");
 const KEY_PATH = path.join(HOME_DIR, "id_ed25519");

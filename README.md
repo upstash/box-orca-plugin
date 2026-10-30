@@ -15,7 +15,7 @@ Status: experimental. Tested with Orca 1.4.245 on macOS.
 ## Set up
 
 ```bash
-npx -y github:upstash/box-orca-plugin#v0.1.0 setup
+npx -y github:upstash/box-orca-plugin#v0.1.1 setup
 ```
 
 Setup asks for your API key (or reads `UPSTASH_BOX_API_KEY`), then:
@@ -35,7 +35,7 @@ snapshot, `--snapshot none` to stop using one.
 In Orca, open Settings > Plugins > Install from git URL and paste:
 
 ```
-https://github.com/upstash/box-orca-plugin.git#v0.1.0
+https://github.com/upstash/box-orca-plugin.git#v0.1.1
 ```
 
 Then create a workspace and pick **Upstash Box** under Run on > Per-Workspace Environment.

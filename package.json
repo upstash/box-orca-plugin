@@ -1,18 +1,19 @@
 {
   "name": "@upstash/box-orca",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Experimental Orca VM recipe adapter for Upstash Box",
   "type": "module",
   "bin": {
     "box-orca": "bin/box-orca.mjs"
   },
   "files": [
+    "LICENSE",
+    "README.md",
+    "assets",
     "bin",
     "orca-plugin.json",
-    "vm-recipe.json",
-    "README.md",
-    "LICENSE"
+    "vm-recipe.json"
   ],
   "engines": {
     "node": ">=20"
