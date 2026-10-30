@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "upstash-box",
+  "name": "Upstash Box",
+  "description": "One Upstash Box per workspace, reached over the Upstash Box SSH gateway",
+  "checkoutMode": "provisioned-root",
+  "create": "\"$HOME/.upstash/box-orca/bin/box-orca\" create",
+  "destroy": "\"$HOME/.upstash/box-orca/bin/box-orca\" destroy"
+}

@@ -1,0 +1,15 @@
+{
+  "manifestVersion": 1,
+  "id": "upstash-box",
+  "publisher": "upstash",
+  "name": "Upstash Box",
+  "version": "0.1.0",
+  "description": "Experimental. Run each Orca workspace in its own Upstash Box, reached over SSH.",
+  "author": { "name": "Upstash", "url": "https://upstash.com/docs/box" },
+  "repository": "https://github.com/upstash/box-orca-plugin",
+  "engines": { "orca": ">=1.4.245" },
+  "pluginApi": 1,
+  "contributes": {
+    "vmRecipes": [{ "path": "vm-recipe.json" }]
+  }
+}
