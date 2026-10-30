@@ -15,7 +15,7 @@ Status: experimental. Tested with Orca 1.4.245 on macOS.
 ## Set up
 
 ```bash
-npx -y @upstash/box-orca@0.1.0 setup
+npx -y github:upstash/box-orca-plugin#v0.1.0 setup
 ```
 
 Setup asks for your API key (or reads `UPSTASH_BOX_API_KEY`), then:

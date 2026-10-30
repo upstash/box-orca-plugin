@@ -83,7 +83,7 @@ function parseFlags(argv) {
 
 function readConfig() {
   if (!fs.existsSync(CONFIG_PATH)) {
-    throw new UserError(`Not set up. Run: npx -y @upstash/box-orca@${VERSION} setup`);
+    throw new UserError(`Not set up. Run: npx -y github:upstash/box-orca-plugin#v${VERSION} setup`);
   }
   const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
   if (!cfg.apiKey) throw new UserError(`${CONFIG_PATH} has no apiKey. Run setup again.`);
@@ -320,8 +320,7 @@ async function cmdCreate() {
       await box.delete();
       log(`Deleted ${box.id}`);
     } catch (e) {
-      log(`Could not delete ${box.id}: ${e.message}. Delete it in the Upstash console or with: ` +
-        `npx @upstash/box-cli delete ${box.id}`);
+      log(`Could not delete ${box.id}: ${e.message}. Delete it in the Upstash Console (Box).`);
     }
   };
   const onSignal = (sig) => {
